@@ -4,223 +4,235 @@ import random
 import threading
 import tkinter as tk
 from tkinter import filedialog, scrolledtext, messagebox
+
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
 
-USERNAME = "aaakksshhaattt"
-PASSWORD = "*****"
-
+# ================= CONFIG =================
+LOGIN_WAIT = 60
 CANCEL_LIMIT = 50
 BATCH_SIZE = 25
 BATCH_PAUSE_MIN = 20
 BATCH_PAUSE_MAX = 45
-DELAY_MIN = 2.0
-DELAY_MAX = 4.0
-LOGIN_WAIT = 30
+DELAY_MIN = 2
+DELAY_MAX = 4
+PROFILE_PATH = r"C:\insta_selenium_profile"
+# ==========================================
 
 
-def human_sleep(min_s=DELAY_MIN, max_s=DELAY_MAX):
-    time.sleep(random.uniform(min_s, max_s))
-
-
-def cancel_request_on_profile(driver, log_widget):
-    try:
-        requested = WebDriverWait(driver, 8).until(
-            EC.presence_of_element_located((
-                By.XPATH,
-                "//div[contains(@aria-label,'Following') or contains(text(),'Requested')]"
-            ))
-        )
-        driver.execute_script("arguments[0].click();", requested)
-        human_sleep(1, 2)
-
-        try:
-            confirm_btn = WebDriverWait(driver, 3).until(
-                EC.element_to_be_clickable((
-                    By.XPATH,
-                    "//button[contains(text(),'Cancel') or contains(text(),'Unfollow')]"
-                ))
-            )
-            driver.execute_script("arguments[0].click();", confirm_btn)
-            log_widget.insert(tk.END, "  ✅ Request cancelled\n")
-        except:
-            log_widget.insert(tk.END, "  ✅ Auto-cancelled (no popup)\n")
-
+# -------- THREAD-SAFE LOGGER --------
+def log(msg):
+    log_widget.after(0, lambda: (
+        log_widget.insert(tk.END, msg),
         log_widget.see(tk.END)
+    ))
+
+
+# -------- COUNTDOWN TIMER --------
+def countdown(seconds, label):
+    for remaining in range(seconds, 0, -1):
+        log(f"⏳ {label}: {remaining}s remaining\n")
+        time.sleep(1)
+
+
+def human_sleep():
+    time.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
+
+
+# -------- CANCEL REQUEST LOGIC --------
+def cancel_request_on_profile(driver):
+    try:
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.TAG_NAME, "button"))
+        )
+
+        driver.execute_script("window.scrollTo(0, 300)")
+        time.sleep(1)
+
+        requested_btn = None
+        for btn in driver.find_elements(By.TAG_NAME, "button"):
+            try:
+                text = btn.text.lower()
+                aria = (btn.get_attribute("aria-label") or "").lower()
+                if "requested" in text or "requested" in aria:
+                    requested_btn = btn
+                    break
+            except:
+                continue
+
+        if not requested_btn:
+            log("  ⚠️ Requested button not found\n")
+            return False
+
+        driver.execute_script("arguments[0].click();", requested_btn)
+        time.sleep(2)
+
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.XPATH, "//div[@role='dialog']"))
+        )
+
+        dialog = driver.find_element(By.XPATH, "//div[@role='dialog']")
+        actions = dialog.find_elements(
+            By.XPATH, ".//button | .//div[@role='button']"
+        )
+
+        if not actions:
+            log("  ⚠️ No cancel option found\n")
+            return False
+
+        driver.execute_script("arguments[0].click();", actions[0])
+        time.sleep(1)
+
+        log("  ✅ Request cancelled\n")
         return True
 
-    except:
-        log_widget.insert(tk.END, "  ⚠️ No 'Requested' button found\n")
-        log_widget.see(tk.END)
+    except Exception as e:
+        log(f"  ❌ Cancel failed: {e}\n")
         return False
 
 
-def start_cancelling(username, password, json_file, log_widget):
-    """Main logic for cancelling follow requests"""
+# -------- MAIN WORKER --------
+def start_cancelling(json_file):
+    driver = None
 
     try:
         options = Options()
         options.add_argument("--start-maximized")
-        driver = webdriver.Chrome(options=options)
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_argument(f"--user-data-dir={PROFILE_PATH}")
 
-    except Exception as e:
-        log_widget.insert(tk.END, f"❌ ChromeDriver error: {e}\n")
-        log_widget.see(tk.END)
-        return
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
 
-    cancelled_count = 0
-    cancelled_requests = []
+        driver.get("https://www.instagram.com/")
+        log("🌐 Instagram opened\n")
+        log("👉 Login manually if required\n")
 
-    try:
-        driver.get("https://www.instagram.com/accounts/login/")
-        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.NAME, "username")))
-        driver.find_element(By.NAME, "username").send_keys(username)
-        driver.find_element(By.NAME, "password").send_keys(password)
-        driver.find_element(By.NAME, "password").send_keys(Keys.RETURN)
+        countdown(LOGIN_WAIT, "Login wait")
 
-        log_widget.insert(tk.END, "Logging in...\n")
-        log_widget.see(tk.END)
-        time.sleep(LOGIN_WAIT)
-
-        for _ in range(2):
-            try:
-                not_now = WebDriverWait(driver, 6).until(
-                    EC.element_to_be_clickable((
-                        By.XPATH,
-                        "//button[contains(., 'Not Now') or contains(., 'Not now')]"
-                    ))
-                )
-                not_now.click()
-                human_sleep(1, 2)
-            except:
-                break
-
-        with open(json_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        requests = data.get("relationships_follow_requests_sent", [])
-        if not requests:
-            log_widget.insert(tk.END, "⚠️ No follow requests found in file.\n")
+        if "login" in driver.current_url:
+            log("❌ Login not detected. Aborting.\n")
             return
 
-        user_links_with_obj = []
-        for req in requests:
+        log("✅ Login detected\n")
+
+        with open(json_file, encoding="utf-8") as f:
+            data = json.load(f)
+
+        requests = (
+            data.get("relationships_follow_requests_sent") or
+            data.get("relationships", {}).get("relationships_follow_requests_sent", [])
+        )
+
+        if not requests:
+            log("⚠️ No follow requests found\n")
+            return
+
+        profiles = []
+        for r in requests:
             try:
-                if req.get("string_list_data"):
-                    entry = req["string_list_data"][0]
-                    href = entry.get("href")
-                    if href:
-                        user_links_with_obj.append((href, req))
-                    else:
-                        uname = entry.get("value")
-                        if uname:
-                            user_links_with_obj.append((f"https://www.instagram.com/{uname}/", req))
-            except Exception:
-                continue
+                s = r["string_list_data"][0]
+                if s.get("href"):
+                    profiles.append((s["href"], r))
+                elif s.get("value"):
+                    profiles.append((f"https://www.instagram.com/{s['value']}/", r))
+            except:
+                pass
 
-        total = len(user_links_with_obj)
-        log_widget.insert(tk.END, f"Found {total} pending requests.\n")
-        log_widget.see(tk.END)
+        log(f"📄 Found {len(profiles)} pending requests\n")
 
-        for idx, (link, req_obj) in enumerate(reversed(user_links_with_obj), start=1):
+        cancelled = []
+        count = 0
 
-            if cancelled_count >= CANCEL_LIMIT:
-                log_widget.insert(tk.END, f"\n✅ Reached {CANCEL_LIMIT} cancellations. Stopping...\n")
+        for i, (link, obj) in enumerate(reversed(profiles), 1):
+            if count >= CANCEL_LIMIT:
+                log("\n🛑 Cancel limit reached\n")
                 break
 
-            try:
-                driver.get(link)
-                log_widget.insert(tk.END, f"[{idx}] Visiting {link}\n")
-                log_widget.see(tk.END)
+            driver.get(link)
+            log(f"[{i}] Visiting {link}\n")
 
-                success = cancel_request_on_profile(driver, log_widget)
-                if success:
-                    cancelled_count += 1
-                    cancelled_requests.append(req_obj)
+            if cancel_request_on_profile(driver):
+                cancelled.append(obj)
+                count += 1
 
-                human_sleep()
+            human_sleep()
 
-                if cancelled_count > 0 and cancelled_count % BATCH_SIZE == 0:
-                    pause_time = random.randint(BATCH_PAUSE_MIN, BATCH_PAUSE_MAX)
-                    log_widget.insert(tk.END, f"--- Batch pause {pause_time}s ---\n")
-                    log_widget.see(tk.END)
-                    time.sleep(pause_time)
+            if count and count % BATCH_SIZE == 0:
+                pause = random.randint(BATCH_PAUSE_MIN, BATCH_PAUSE_MAX)
+                countdown(pause, "Batch pause")
 
-            except Exception as e:
-                log_widget.insert(tk.END, f"❌ Error: {e}\n")
-                log_widget.see(tk.END)
-                time.sleep(2)
+        if cancelled:
+            remaining = [r for r in requests if r not in cancelled]
 
-        if cancelled_requests:
-            remaining = [r for r in requests if r not in cancelled_requests]
-            data["relationships_follow_requests_sent"] = remaining
+            if "relationships_follow_requests_sent" in data:
+                data["relationships_follow_requests_sent"] = remaining
+            else:
+                data["relationships"]["relationships_follow_requests_sent"] = remaining
 
             with open(json_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
 
-            log_widget.insert(tk.END, f"✅ Removed {len(cancelled_requests)} entries from JSON file.\n")
+            log(f"🧹 Removed {len(cancelled)} entries from JSON\n")
 
-        log_widget.insert(tk.END, f"\n🎉 Finished. Cancelled {cancelled_count} requests.\n")
-        log_widget.see(tk.END)
+        log(f"\n🎉 Done! Cancelled {count} requests\n")
+        log("🧹 Closing Chrome in 3s...\n")
+        countdown(3, "Closing Chrome")
+
+    except Exception as e:
+        log(f"❌ Error: {e}\n")
 
     finally:
-        driver.quit()
+        if driver:
+            driver.quit()
+            log("✅ Chrome closed\n")
 
 
-def browse_json(entry_widget):
-    file_path = filedialog.askopenfilename(filetypes=[("JSON files", "*.json")])
-    if file_path:
-        entry_widget.delete(0, tk.END)
-        entry_widget.insert(0, file_path)
+# -------- UI HELPERS --------
+def browse_json(entry):
+    path = filedialog.askopenfilename(filetypes=[("JSON files", "*.json")])
+    if path:
+        entry.delete(0, tk.END)
+        entry.insert(0, path)
 
 
-def start_thread(username_entry, password_entry, json_entry, log_widget):
-    username = username_entry.get()
-    password = password_entry.get()
-    json_file = json_entry.get()
-
-    if not json_file:
-        messagebox.showwarning("Missing File", "Please select a JSON file first!")
+def start_thread():
+    if not json_entry.get():
+        messagebox.showwarning("Missing File", "Select JSON file first")
         return
 
     threading.Thread(
         target=start_cancelling,
-        args=(username, password, json_file, log_widget),
+        args=(json_entry.get(),),
         daemon=True
     ).start()
 
 
+# -------- UI --------
 root = tk.Tk()
-root.title("🚀 Instagram Auto Cancel (Bottom 50) 🚀")
+root.title("🚀 Instagram Auto Cancel (Countdown Edition) 🚀")
 root.geometry("820x600")
 root.configure(bg="#0f0f1a")
 
-tk.Label(root, text="Username:", fg="#39ff14", bg="#0f0f1a", font=("Consolas", 12)).place(x=20, y=20)
-username_entry = tk.Entry(root, fg="#39ff14", bg="#0f0f1a", font=("Consolas", 12), insertbackground="#39ff14")
-username_entry.insert(0, USERNAME)
-username_entry.place(x=120, y=20, width=250)
-
-tk.Label(root, text="Password:", fg="#39ff14", bg="#0f0f1a", font=("Consolas", 12)).place(x=20, y=60)
-password_entry = tk.Entry(root, fg="#39ff14", bg="#0f0f1a", font=("Consolas", 12), insertbackground="#39ff14", show="*")
-password_entry.insert(0, PASSWORD)
-password_entry.place(x=120, y=60, width=250)
-
-tk.Label(root, text="JSON File:", fg="#39ff14", bg="#0f0f1a", font=("Consolas", 12)).place(x=20, y=100)
-json_entry = tk.Entry(root, fg="#39ff14", bg="#0f0f1a", font=("Consolas", 12), insertbackground="#39ff14")
-json_entry.place(x=120, y=100, width=500)
+tk.Label(root, text="JSON File:", fg="#39ff14", bg="#0f0f1a").place(x=20, y=20)
+json_entry = tk.Entry(root, fg="#39ff14", bg="#0f0f1a", insertbackground="#39ff14")
+json_entry.place(x=120, y=20, width=500)
 
 tk.Button(root, text="Browse", command=lambda: browse_json(json_entry),
-          fg="#0f0f1a", bg="#39ff14", font=("Consolas", 10, "bold")).place(x=640, y=97)
+          bg="#39ff14").place(x=640, y=17)
 
 tk.Button(root, text="Start Canceling 🚀",
-          command=lambda: start_thread(username_entry, password_entry, json_entry, log_widget),
-          fg="#0f0f1a", bg="#39ff14", font=("Consolas", 14, "bold")).place(x=300, y=150)
+          command=start_thread, bg="#39ff14").place(x=300, y=60)
 
-log_widget = scrolledtext.ScrolledText(root, width=95, height=25, bg="#1a1a2e", fg="#39ff14", font=("Consolas", 10))
-log_widget.place(x=20, y=200)
+log_widget = scrolledtext.ScrolledText(
+    root, width=95, height=30, bg="#1a1a2e", fg="#39ff14"
+)
+log_widget.place(x=20, y=110)
 
 root.mainloop()
